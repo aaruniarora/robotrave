@@ -6,6 +6,15 @@ import {
   PoseLandmarker,
   type PoseLandmarkerResult,
 } from "@mediapipe/tasks-vision";
+import {
+  defaultHumanoid16Config,
+  defaultTonyPiHeadConfig,
+  HUMANOID16_SERVO_NAMES,
+  poseToHumanoid16Frame,
+  smoothServoDegrees,
+  tonyPiIdForIndex,
+  type HumanBaseline,
+} from "../robot/humanoid16";
 
 type Status = "idle" | "loading" | "running" | "error";
 type SourceMode = "webcam" | "video";
@@ -25,6 +34,58 @@ export default function MediapipePoseDebug() {
   const [videoUrlInput, setVideoUrlInput] = useState("/videos/demo.mp4");
   const [activeVideoUrl, setActiveVideoUrl] = useState<string | null>(null);
   const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
+
+  // --- Robot mapping + terminal output ---
+  const [robotEnabled, setRobotEnabled] = useState(false);
+  const [sendToTonyPi, setSendToTonyPi] = useState(false);
+  const [tonyPiUrl, setTonyPiUrl] = useState("http://<TONYPI_IP>:8080/servo");
+  const [tonyPiStatus, setTonyPiStatus] = useState<"idle" | "ok" | "error">(
+    "idle"
+  );
+
+  const cfgRef = useRef(defaultHumanoid16Config());
+  const headCfgRef = useRef(defaultTonyPiHeadConfig());
+  const [baseline, setBaseline] = useState<HumanBaseline | null>(null);
+  const [servoDegrees, setServoDegrees] = useState<number[] | null>(null);
+  const [headOut, setHeadOut] = useState<{ p1: number; p2: number } | null>(
+    null
+  );
+  const [humanDebug, setHumanDebug] = useState<Record<string, number> | null>(
+    null
+  );
+  const [smoothing, setSmoothing] = useState(0.35); // EMA alpha
+  const [terminalFps, setTerminalFps] = useState(10);
+
+  const baselineRef = useRef<HumanBaseline | null>(null);
+  const robotEnabledRef = useRef(false);
+  const sendToTonyPiRef = useRef(false);
+  const tonyPiUrlRef = useRef("http://<TONYPI_IP>:8080/servo");
+  const smoothingRef = useRef(0.35);
+  const terminalFpsRef = useRef(10);
+  const servoRef = useRef<number[] | null>(null);
+  const lastTerminalSendAtRef = useRef(0);
+
+  useEffect(() => {
+    baselineRef.current = baseline;
+  }, [baseline]);
+  useEffect(() => {
+    robotEnabledRef.current = robotEnabled;
+  }, [robotEnabled]);
+  useEffect(() => {
+    sendToTonyPiRef.current = sendToTonyPi;
+  }, [sendToTonyPi]);
+  useEffect(() => {
+    tonyPiUrlRef.current = tonyPiUrl;
+  }, [tonyPiUrl]);
+  useEffect(() => {
+    smoothingRef.current = smoothing;
+  }, [smoothing]);
+  useEffect(() => {
+    terminalFpsRef.current = terminalFps;
+  }, [terminalFps]);
+  useEffect(() => {
+    servoRef.current = servoDegrees;
+  }, [servoDegrees]);
 
   const videoConstraints = useMemo(
     () => ({
@@ -148,6 +209,66 @@ export default function MediapipePoseDebug() {
       try {
         const res = landmarker.detectForVideo(video, performance.now());
         draw(ctx, res);
+
+        // --- Robot mapping: use the first detected person ---
+        const first = res.landmarks?.[0];
+        if (first?.length) {
+          const frame = poseToHumanoid16Frame(
+            first,
+            cfgRef.current,
+            baselineRef.current ?? undefined,
+            headCfgRef.current
+          );
+
+          const next = frame.degrees;
+          const smoothed = smoothServoDegrees(
+            servoRef.current,
+            next,
+            smoothingRef.current
+          );
+          setServoDegrees(smoothed);
+          setHeadOut(frame.head ?? null);
+
+          // Keep a small human-angle debug snapshot
+          const hd: Record<string, number> = {};
+          for (const [k, v] of Object.entries(frame.human)) {
+            if (v != null && Number.isFinite(v)) hd[k] = Number(v);
+          }
+          setHumanDebug(hd);
+
+          // Dev server terminal output (no websocket): POST throttled frames to Vite middleware.
+          if (robotEnabledRef.current) {
+            const now = performance.now();
+            const minMs = 1000 / Math.max(1, terminalFpsRef.current);
+            if (now - lastTerminalSendAtRef.current >= minMs) {
+              lastTerminalSendAtRef.current = now;
+              const payload = {
+                t: Date.now(),
+                kind: "humanoid16",
+                degrees: smoothed,
+                head: frame.head ?? null,
+              };
+
+              // Always print locally to the Vite terminal (dev-only).
+              void fetch("/__servo", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              }).catch(() => {});
+
+              // Optionally send to the TonyPi over Wi-Fi.
+              if (sendToTonyPiRef.current) {
+                void fetch(tonyPiUrlRef.current, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(payload),
+                })
+                  .then((r) => setTonyPiStatus(r.ok ? "ok" : "error"))
+                  .catch(() => setTonyPiStatus("error"));
+              }
+            }
+          }
+        }
       } catch {
         // ignore transient frame errors
       } finally {
@@ -258,6 +379,7 @@ export default function MediapipePoseDebug() {
             "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
           fontSize: 12,
           lineHeight: 1.3,
+          width: 420,
         }}
       >
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -338,6 +460,169 @@ export default function MediapipePoseDebug() {
               onChange={(e) => setMirror(e.target.checked)}
             />
           </label>
+        </div>
+
+        <div
+          style={{
+            marginTop: 12,
+            borderTop: "1px solid rgba(255,255,255,0.12)",
+            paddingTop: 10,
+            display: "grid",
+            gap: 8,
+          }}
+        >
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <strong style={{ fontWeight: 700 }}>Robot output</strong>
+            <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={robotEnabled}
+                onChange={(e) => setRobotEnabled(e.target.checked)}
+              />
+              <span style={{ opacity: 0.9 }}>print to terminal</span>
+            </label>
+            <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={sendToTonyPi}
+                onChange={(e) => setSendToTonyPi(e.target.checked)}
+              />
+              <span style={{ opacity: 0.9 }}>send to TonyPi</span>
+            </label>
+            <button
+              onClick={() => {
+                // Capture baseline from current human debug snapshot
+                // (baseline is interpreted as "neutral pose" for delta mapping)
+                setBaseline(
+                  (humanDebug ?? null) as unknown as HumanBaseline | null
+                );
+              }}
+              disabled={!humanDebug}
+              title="Capture current pose as neutral baseline"
+            >
+              Calibrate neutral
+            </button>
+            <button onClick={() => setBaseline(null)} title="Clear baseline">
+              Clear
+            </button>
+          </div>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ width: 62, opacity: 0.9 }}>Smooth</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={smoothing}
+              onChange={(e) => setSmoothing(Number(e.target.value))}
+              style={{ width: 240 }}
+            />
+            <span style={{ opacity: 0.85 }}>{smoothing.toFixed(2)}</span>
+          </label>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ width: 62, opacity: 0.9 }}>FPS</span>
+            <input
+              type="range"
+              min={1}
+              max={30}
+              step={1}
+              value={terminalFps}
+              onChange={(e) => setTerminalFps(Number(e.target.value))}
+              style={{ width: 240 }}
+            />
+            <span style={{ opacity: 0.85 }}>{terminalFps}</span>
+          </label>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ width: 62, opacity: 0.9 }}>TonyPi</span>
+            <input
+              value={tonyPiUrl}
+              onChange={(e) => setTonyPiUrl(e.target.value)}
+              style={{ width: 240 }}
+              placeholder="http://<TONYPI_IP>:8080/servo"
+            />
+            <span style={{ opacity: 0.85 }}>
+              {tonyPiStatus === "idle"
+                ? ""
+                : tonyPiStatus === "ok"
+                ? "ok"
+                : "error"}
+            </span>
+          </label>
+
+          <div style={{ opacity: 0.85 }}>
+            Servos:
+            <div
+              style={{
+                marginTop: 6,
+                display: "grid",
+                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                gap: "4px 12px",
+              }}
+            >
+              {HUMANOID16_SERVO_NAMES.map((name, i) => {
+                const v = servoDegrees?.[i];
+                return (
+                  <div
+                    key={`${tonyPiIdForIndex(i)}-${name}`}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 10,
+                      padding: "2px 6px",
+                      borderRadius: 6,
+                      background: "rgba(255,255,255,0.06)",
+                    }}
+                  >
+                    <code style={{ opacity: 0.95 }}>
+                      ID{tonyPiIdForIndex(i)} {name}
+                    </code>
+                    <code style={{ opacity: 0.95 }}>
+                      {v != null ? `${Math.round(v)}°` : "—"}
+                    </code>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ opacity: 0.85 }}>
+            Head (PWM):
+            <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  padding: "2px 6px",
+                  borderRadius: 6,
+                  background: "rgba(255,255,255,0.06)",
+                }}
+              >
+                <code style={{ opacity: 0.95 }}>p1 head_pitch</code>
+                <code style={{ opacity: 0.95 }}>
+                  {headOut ? `${Math.round(headOut.p1)}°` : "—"}
+                </code>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  padding: "2px 6px",
+                  borderRadius: 6,
+                  background: "rgba(255,255,255,0.06)",
+                }}
+              >
+                <code style={{ opacity: 0.95 }}>p2 head_yaw</code>
+                <code style={{ opacity: 0.95 }}>
+                  {headOut ? `${Math.round(headOut.p2)}°` : "—"}
+                </code>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

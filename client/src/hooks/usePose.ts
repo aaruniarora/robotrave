@@ -30,7 +30,7 @@ export interface PosePoint {
   z?: number;
 }
 
-export interface PoseData extends Partial<Record<Joint, PosePoint | null>> {
+export type PoseData = Partial<Record<Joint, PosePoint | null>> & {
   id: number;
   // any extra per-frame metrics here:
   leftElbowAngleDeg?: number | null;
@@ -39,7 +39,7 @@ export interface PoseData extends Partial<Record<Joint, PosePoint | null>> {
   rightElbowAngle3D?: number | null;
   trunkTiltDeg?: number | null;
   compensating?: boolean;
-}
+};
 
 // Session storage
 export interface Frame {
