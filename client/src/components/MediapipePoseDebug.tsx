@@ -19,6 +19,11 @@ import {
 type Status = "idle" | "loading" | "running" | "error";
 type SourceMode = "webcam" | "video";
 
+const degreesToPulse = (deg: number) => {
+  const clamped = Math.max(0, Math.min(180, deg));
+  return Math.round((clamped / 180) * 1000);
+};
+
 export default function MediapipePoseDebug() {
   const webcamRef = useRef<Webcam | null>(null);
   const fileVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -37,11 +42,12 @@ export default function MediapipePoseDebug() {
 
   // --- Robot mapping + terminal output ---
   const [robotEnabled, setRobotEnabled] = useState(false);
-  const [sendToTonyPi, setSendToTonyPi] = useState(false);
-  const [tonyPiUrl, setTonyPiUrl] = useState("http://<TONYPI_IP>:8080/servo");
-  const [tonyPiStatus, setTonyPiStatus] = useState<"idle" | "ok" | "error">(
-    "idle"
-  );
+  const [sendToRobot, setSendToRobot] = useState(false);
+  const [wsUrl, setWsUrl] = useState("ws://192.168.0.104:8766");
+  const [wsState, setWsState] = useState<
+    "disconnected" | "connecting" | "open" | "error"
+  >("disconnected");
+  const wsRef = useRef<WebSocket | null>(null);
 
   const cfgRef = useRef(defaultHumanoid16Config());
   const headCfgRef = useRef(defaultTonyPiHeadConfig());
@@ -58,8 +64,6 @@ export default function MediapipePoseDebug() {
 
   const baselineRef = useRef<HumanBaseline | null>(null);
   const robotEnabledRef = useRef(false);
-  const sendToTonyPiRef = useRef(false);
-  const tonyPiUrlRef = useRef("http://<TONYPI_IP>:8080/servo");
   const smoothingRef = useRef(0.35);
   const terminalFpsRef = useRef(10);
   const servoRef = useRef<number[] | null>(null);
@@ -72,12 +76,6 @@ export default function MediapipePoseDebug() {
     robotEnabledRef.current = robotEnabled;
   }, [robotEnabled]);
   useEffect(() => {
-    sendToTonyPiRef.current = sendToTonyPi;
-  }, [sendToTonyPi]);
-  useEffect(() => {
-    tonyPiUrlRef.current = tonyPiUrl;
-  }, [tonyPiUrl]);
-  useEffect(() => {
     smoothingRef.current = smoothing;
   }, [smoothing]);
   useEffect(() => {
@@ -86,6 +84,38 @@ export default function MediapipePoseDebug() {
   useEffect(() => {
     servoRef.current = servoDegrees;
   }, [servoDegrees]);
+
+  const sendToRobotRef = useRef(false);
+  useEffect(() => {
+    sendToRobotRef.current = sendToRobot && wsState === "open";
+  }, [sendToRobot, wsState]);
+
+  const connectWs = () => {
+    if (wsRef.current || wsState === "connecting") return;
+    setWsState("connecting");
+    try {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      ws.onopen = () => setWsState("open");
+      ws.onclose = () => {
+        wsRef.current = null;
+        setWsState("disconnected");
+      };
+      ws.onerror = () => {
+        wsRef.current = null;
+        setWsState("error");
+      };
+    } catch {
+      wsRef.current = null;
+      setWsState("error");
+    }
+  };
+
+  const disconnectWs = () => {
+    wsRef.current?.close();
+    wsRef.current = null;
+    setWsState("disconnected");
+  };
 
   const videoConstraints = useMemo(
     () => ({
@@ -256,15 +286,20 @@ export default function MediapipePoseDebug() {
                 body: JSON.stringify(payload),
               }).catch(() => {});
 
-              // Optionally send to the TonyPi over Wi-Fi.
-              if (sendToTonyPiRef.current) {
-                void fetch(tonyPiUrlRef.current, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(payload),
-                })
-                  .then((r) => setTonyPiStatus(r.ok ? "ok" : "error"))
-                  .catch(() => setTonyPiStatus("error"));
+              // Send to the robot over WebSocket (if connected).
+              // Use TonyPi's native servo receiver format:
+              // { type:"servos", servos: { "1": pulse, ..., "16": pulse } }
+              if (sendToRobotRef.current && wsRef.current) {
+                const servos: Record<string, number> = {};
+                smoothed.forEach((deg, idx) => {
+                  servos[String(idx + 1)] = degreesToPulse(deg);
+                });
+                wsRef.current.send(
+                  JSON.stringify({
+                    type: "servos",
+                    servos,
+                  })
+                );
               }
             }
           }
@@ -484,10 +519,10 @@ export default function MediapipePoseDebug() {
             <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <input
                 type="checkbox"
-                checked={sendToTonyPi}
-                onChange={(e) => setSendToTonyPi(e.target.checked)}
+                checked={sendToRobot}
+                onChange={(e) => setSendToRobot(e.target.checked)}
               />
-              <span style={{ opacity: 0.9 }}>send to TonyPi</span>
+              <span style={{ opacity: 0.9 }}>send to robot</span>
             </label>
             <button
               onClick={() => {
@@ -535,22 +570,36 @@ export default function MediapipePoseDebug() {
             <span style={{ opacity: 0.85 }}>{terminalFps}</span>
           </label>
 
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ width: 62, opacity: 0.9 }}>TonyPi</span>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ width: 62, opacity: 0.9 }}>Robot</span>
             <input
-              value={tonyPiUrl}
-              onChange={(e) => setTonyPiUrl(e.target.value)}
-              style={{ width: 240 }}
-              placeholder="http://<TONYPI_IP>:8080/servo"
+              value={wsUrl}
+              onChange={(e) => setWsUrl(e.target.value)}
+              style={{ width: 200 }}
+              placeholder="ws://192.168.0.104:8766"
+              disabled={wsState === "connecting" || wsState === "open"}
             />
-            <span style={{ opacity: 0.85 }}>
-              {tonyPiStatus === "idle"
-                ? ""
-                : tonyPiStatus === "ok"
-                ? "ok"
-                : "error"}
+            {wsState === "open" ? (
+              <button onClick={disconnectWs}>Disconnect</button>
+            ) : (
+              <button onClick={connectWs} disabled={wsState === "connecting"}>
+                {wsState === "connecting" ? "Connecting…" : "Connect"}
+              </button>
+            )}
+            <span
+              style={{
+                opacity: 0.85,
+                color:
+                  wsState === "open"
+                    ? "#6f6"
+                    : wsState === "error"
+                    ? "#f66"
+                    : undefined,
+              }}
+            >
+              {wsState}
             </span>
-          </label>
+          </div>
 
           <div style={{ opacity: 0.85 }}>
             Servos:
