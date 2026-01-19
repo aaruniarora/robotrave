@@ -84,11 +84,11 @@ export function tonyPiIdForIndex(i: number): number {
 }
 
 export type ServoSpec = {
-  // servo output angle in degrees (typical 0..180)
+  // servo output units (bus: 0..1000, pwm: 500..2500)
   min: number;
   max: number;
   center: number;
-  // mapping from human angle delta (deg) to servo delta (deg)
+  // mapping from human angle delta (deg) to servo delta (pulse units)
   scale: number;
   direction: 1 | -1;
 };
@@ -127,8 +127,8 @@ export type HumanAngles = Partial<
 export type HumanBaseline = HumanAngles;
 
 export type ServoFrame = {
-  // servo degrees indexed 0..15 corresponding to HUMANOID16_SERVO_NAMES
-  degrees: number[];
+  // bus servo pulses indexed 0..15 corresponding to HUMANOID16_SERVO_NAMES
+  pulses: number[];
   head?: { p1: number; p2: number };
   human: HumanAngles;
 };
@@ -177,33 +177,38 @@ const pick = (
 
 const mid = (a: Vec2, b: Vec2): Vec2 => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
+const DEFAULT_PULSE_SCALE = 4.0; // pulse units per human degree (conservative)
+const BUS_PULSE_MIN = 300;
+const BUS_PULSE_MAX = 700;
+const BUS_PULSE_CENTER = 500;
+
 export const defaultHumanoid16Config = (): Humanoid16Config => ({
   // Note: ankle roll is not reliably inferable from 2D pose; keep it near center by default.
-  leftAnkleRoll: { min: 0, max: 180, center: 90, scale: 0.3, direction: 1 },
-  leftAnklePitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: 1 },
-  leftKneePitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: -1 },
-  leftHipPitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: 1 },
-  leftHipRoll: { min: 0, max: 180, center: 90, scale: 1.0, direction: 1 },
+  leftAnkleRoll: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 610, scale: 1.2, direction: 1 },
+  leftAnklePitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: BUS_PULSE_CENTER, scale: DEFAULT_PULSE_SCALE, direction: 1 },
+  leftKneePitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: BUS_PULSE_CENTER, scale: DEFAULT_PULSE_SCALE, direction: -1 },
+  leftHipPitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 500, scale: DEFAULT_PULSE_SCALE, direction: 1 },
+  leftHipRoll: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 400, scale: DEFAULT_PULSE_SCALE, direction: 1 },
 
-  leftElbowPitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: -1 },
-  leftShoulderRoll: { min: 0, max: 180, center: 90, scale: 1.2, direction: 1 },
-  leftShoulderPitch: { min: 0, max: 180, center: 90, scale: 1.2, direction: 1 },
+  leftElbowPitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 575, scale: DEFAULT_PULSE_SCALE, direction: -1 },
+  leftShoulderRoll: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 725, scale: DEFAULT_PULSE_SCALE, direction: 1 },
+  leftShoulderPitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 800, scale: DEFAULT_PULSE_SCALE, direction: 1 },
 
-  rightAnkleRoll: { min: 0, max: 180, center: 90, scale: 0.3, direction: 1 },
-  rightAnklePitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: 1 },
-  rightKneePitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: -1 },
-  rightHipPitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: 1 },
-  rightHipRoll: { min: 0, max: 180, center: 90, scale: 1.0, direction: -1 },
+  rightAnkleRoll: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 390, scale: 1.2, direction: 1 },
+  rightAnklePitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: BUS_PULSE_CENTER, scale: DEFAULT_PULSE_SCALE, direction: 1 },
+  rightKneePitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: BUS_PULSE_CENTER, scale: DEFAULT_PULSE_SCALE, direction: -1 },
+  rightHipPitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 500, scale: DEFAULT_PULSE_SCALE, direction: 1 },
+  rightHipRoll: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 600, scale: DEFAULT_PULSE_SCALE, direction: -1 },
 
-  rightElbowPitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: 1 },
-  rightShoulderRoll: { min: 0, max: 180, center: 90, scale: 1.2, direction: -1 },
-  rightShoulderPitch: { min: 0, max: 180, center: 90, scale: 1.2, direction: 1 },
+  rightElbowPitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 425, scale: DEFAULT_PULSE_SCALE, direction: 1 },
+  rightShoulderRoll: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 275, scale: DEFAULT_PULSE_SCALE, direction: -1 },
+  rightShoulderPitch: { min: BUS_PULSE_MIN, max: BUS_PULSE_MAX, center: 200, scale: DEFAULT_PULSE_SCALE, direction: 1 },
 });
 
 export const defaultTonyPiHeadConfig = (): HeadConfig => ({
-  // User-provided: p1=head_pitch, p2=head_yaw
-  p1_headPitch: { min: 0, max: 180, center: 90, scale: 1.0, direction: 1 },
-  p2_headYaw: { min: 0, max: 180, center: 90, scale: 1.0, direction: 1 },
+  // User-provided: p1=head_pitch, p2=head_yaw (PWM microseconds)
+  p1_headPitch: { min: 500, max: 2500, center: 500, scale: 11.1, direction: 1 },
+  p2_headYaw: { min: 500, max: 2500, center: 500, scale: 11.1, direction: 1 },
 });
 
 export function estimateHumanAngles2D(lms: Landmark2D[]): HumanAngles {
@@ -322,7 +327,7 @@ export function poseToHumanoid16Frame(
   const human = estimateHumanAngles2D(lms);
   const base = baseline ?? {};
 
-  const degrees = HUMANOID16_SERVO_NAMES.map((name) => {
+  const pulses = HUMANOID16_SERVO_NAMES.map((name) => {
     const spec = cfg[name];
     switch (name) {
       case "leftElbowPitch":
@@ -355,10 +360,10 @@ export function poseToHumanoid16Frame(
     };
   }
 
-  return { degrees, head, human };
+  return { pulses, head, human };
 }
 
-export function smoothServoDegrees(
+export function smoothServoPulses(
   prev: number[] | null,
   next: number[],
   alpha: number

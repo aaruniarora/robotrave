@@ -83,6 +83,21 @@ async def handler(websocket):
     try:
         async for message in websocket:
             data = json.loads(message)
+            msg_type = data.get("type")
+
+            if msg_type == "servos":
+                servos = data.get("servos")
+                if isinstance(servos, dict):
+                    for sid, pulse in servos.items():
+                        set_bus_servo(int(sid), int(pulse), 80)
+                head = data.get("head")
+                if isinstance(head, dict):
+                    if "p1" in head:
+                        set_pwm_servo(1, int(head["p1"]), 80)
+                    if "p2" in head:
+                        set_pwm_servo(2, int(head["p2"]), 80)
+                continue
+
             if data.get("kind") != "humanoid16":
                 continue
             degrees = data.get("degrees")

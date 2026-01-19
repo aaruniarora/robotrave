@@ -11,18 +11,13 @@ import {
   defaultTonyPiHeadConfig,
   HUMANOID16_SERVO_NAMES,
   poseToHumanoid16Frame,
-  smoothServoDegrees,
+  smoothServoPulses,
   tonyPiIdForIndex,
   type HumanBaseline,
 } from "../robot/humanoid16";
 
 type Status = "idle" | "loading" | "running" | "error";
 type SourceMode = "webcam" | "video";
-
-const degreesToPulse = (deg: number) => {
-  const clamped = Math.max(0, Math.min(180, deg));
-  return Math.round((clamped / 180) * 1000);
-};
 
 export default function MediapipePoseDebug() {
   const webcamRef = useRef<Webcam | null>(null);
@@ -34,6 +29,8 @@ export default function MediapipePoseDebug() {
 
   const [sourceMode, setSourceMode] = useState<SourceMode>("webcam");
   const [mirror, setMirror] = useState(true);
+  const [videoEnabled, setVideoEnabled] = useState(true);
+  const [videoKey, setVideoKey] = useState(0);
 
   // Public URL (served from client/public). Example: /videos/demo.mp4
   const [videoUrlInput, setVideoUrlInput] = useState("/videos/demo.mp4");
@@ -52,7 +49,7 @@ export default function MediapipePoseDebug() {
   const cfgRef = useRef(defaultHumanoid16Config());
   const headCfgRef = useRef(defaultTonyPiHeadConfig());
   const [baseline, setBaseline] = useState<HumanBaseline | null>(null);
-  const [servoDegrees, setServoDegrees] = useState<number[] | null>(null);
+  const [servoPulses, setServoPulses] = useState<number[] | null>(null);
   const [headOut, setHeadOut] = useState<{ p1: number; p2: number } | null>(
     null
   );
@@ -61,6 +58,11 @@ export default function MediapipePoseDebug() {
   );
   const [smoothing, setSmoothing] = useState(0.35); // EMA alpha
   const [terminalFps, setTerminalFps] = useState(10);
+  const [servoEnabled, setServoEnabled] = useState<Record<number, boolean>>(() =>
+    Object.fromEntries(
+      Array.from({ length: 16 }, (_, i) => [i + 1, true] as const)
+    )
+  );
 
   const baselineRef = useRef<HumanBaseline | null>(null);
   const robotEnabledRef = useRef(false);
@@ -68,6 +70,7 @@ export default function MediapipePoseDebug() {
   const terminalFpsRef = useRef(10);
   const servoRef = useRef<number[] | null>(null);
   const lastTerminalSendAtRef = useRef(0);
+  const enabledServoIdsRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     baselineRef.current = baseline;
@@ -82,13 +85,44 @@ export default function MediapipePoseDebug() {
     terminalFpsRef.current = terminalFps;
   }, [terminalFps]);
   useEffect(() => {
-    servoRef.current = servoDegrees;
-  }, [servoDegrees]);
+    servoRef.current = servoPulses;
+  }, [servoPulses]);
+  useEffect(() => {
+    enabledServoIdsRef.current = new Set(
+      Object.entries(servoEnabled)
+        .filter(([, enabled]) => enabled)
+        .map(([id]) => Number(id))
+    );
+  }, [servoEnabled]);
 
   const sendToRobotRef = useRef(false);
   useEffect(() => {
     sendToRobotRef.current = sendToRobot && wsState === "open";
   }, [sendToRobot, wsState]);
+
+  const setIdsEnabled = (ids: number[], enabled: boolean) => {
+    setServoEnabled((prev) => {
+      const next = { ...prev };
+      ids.forEach((id) => {
+        next[id] = enabled;
+      });
+      return next;
+    });
+  };
+
+  const setAllIdsEnabled = (enabled: boolean) => {
+    setIdsEnabled(
+      Array.from({ length: 16 }, (_, i) => i + 1),
+      enabled
+    );
+  };
+
+  const servoGroups = [
+    { label: "Left leg", ids: [1, 2, 3, 4, 5] },
+    { label: "Right leg", ids: [9, 10, 11, 12, 13] },
+    { label: "Left arm", ids: [6, 7, 8] },
+    { label: "Right arm", ids: [14, 15, 16] },
+  ] as const;
 
   const connectWs = () => {
     if (wsRef.current || wsState === "connecting") return;
@@ -115,6 +149,42 @@ export default function MediapipePoseDebug() {
     wsRef.current?.close();
     wsRef.current = null;
     setWsState("disconnected");
+  };
+
+  const stopVideo = () => {
+    const video = webcamRef.current?.video ?? fileVideoRef.current;
+    if (video) {
+      try {
+        video.pause();
+      } catch {}
+      const stream = video.srcObject as MediaStream | null;
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        video.srcObject = null;
+      }
+    }
+    setVideoEnabled(false);
+  };
+
+  const startVideo = () => {
+    setVideoEnabled(true);
+    setVideoKey((k) => k + 1);
+  };
+
+  const sendNeutralPose = () => {
+    const servos: Record<string, number> = {};
+    for (let i = 1; i <= 16; i += 1) servos[String(i)] = 500;
+    if (wsRef.current && wsState === "open") {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "servos",
+          servos,
+          head: { p1: 1500, p2: 1500 },
+        })
+      );
+    }
+    setServoPulses(Array(16).fill(500));
+    setHeadOut({ p1: 1500, p2: 1500 });
   };
 
   const videoConstraints = useMemo(
@@ -156,18 +226,18 @@ export default function MediapipePoseDebug() {
           baseOptions: { ...baseOptions, delegate: "GPU" },
           runningMode: "VIDEO",
           numPoses: 1,
-          minPoseDetectionConfidence: 0.6,
-          minPosePresenceConfidence: 0.6,
-          minTrackingConfidence: 0.6,
+          minPoseDetectionConfidence: 0.8,
+          minPosePresenceConfidence: 0.8,
+          minTrackingConfidence: 0.8,
         });
       } catch {
         return await PoseLandmarker.createFromOptions(vision, {
           baseOptions: { ...baseOptions, delegate: "CPU" },
           runningMode: "VIDEO",
           numPoses: 1,
-          minPoseDetectionConfidence: 0.6,
-          minPosePresenceConfidence: 0.6,
-          minTrackingConfidence: 0.6,
+          minPoseDetectionConfidence: 0.8,
+          minPosePresenceConfidence: 0.8,
+          minTrackingConfidence: 0.8,
         });
       }
     };
@@ -195,6 +265,11 @@ export default function MediapipePoseDebug() {
 
     const loop = async () => {
       if (disposed) return;
+
+      if (!videoEnabled) {
+        rafId = requestAnimationFrame(loop);
+        return;
+      }
 
       const video = getActiveVideoEl();
       const canvas = canvasRef.current;
@@ -250,13 +325,13 @@ export default function MediapipePoseDebug() {
             headCfgRef.current
           );
 
-          const next = frame.degrees;
-          const smoothed = smoothServoDegrees(
+          const next = frame.pulses;
+          const smoothed = smoothServoPulses(
             servoRef.current,
             next,
             smoothingRef.current
           );
-          setServoDegrees(smoothed);
+          setServoPulses(smoothed);
           setHeadOut(frame.head ?? null);
 
           // Keep a small human-angle debug snapshot
@@ -275,7 +350,7 @@ export default function MediapipePoseDebug() {
               const payload = {
                 t: Date.now(),
                 kind: "humanoid16",
-                degrees: smoothed,
+                pulses: smoothed,
                 head: frame.head ?? null,
               };
 
@@ -291,13 +366,17 @@ export default function MediapipePoseDebug() {
               // { type:"servos", servos: { "1": pulse, ..., "16": pulse } }
               if (sendToRobotRef.current && wsRef.current) {
                 const servos: Record<string, number> = {};
-                smoothed.forEach((deg, idx) => {
-                  servos[String(idx + 1)] = degreesToPulse(deg);
+                smoothed.forEach((pulse, idx) => {
+                  const id = idx + 1;
+                  if (enabledServoIdsRef.current.has(id)) {
+                    servos[String(id)] = Math.round(pulse);
+                  }
                 });
                 wsRef.current.send(
                   JSON.stringify({
                     type: "servos",
                     servos,
+                    head: frame.head ?? null,
                   })
                 );
               }
@@ -347,46 +426,66 @@ export default function MediapipePoseDebug() {
         background: "#0b0b0b",
       }}
     >
-      {sourceMode === "webcam" ? (
-        <Webcam
-          ref={webcamRef}
-          audio={false}
-          videoConstraints={videoConstraints}
-          style={{
-            position: "absolute",
-            inset: 0,
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-            transform: mirror ? "scaleX(-1)" : undefined,
-          }}
-        />
+      {videoEnabled ? (
+        sourceMode === "webcam" ? (
+          <Webcam
+            key={`webcam-${videoKey}`}
+            ref={webcamRef}
+            audio={false}
+            videoConstraints={videoConstraints}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              transform: mirror ? "scaleX(-1)" : undefined,
+            }}
+          />
+        ) : (
+          <video
+            key={`file-${videoKey}`}
+            ref={fileVideoRef}
+            src={activeVideoUrl ?? undefined}
+            controls
+            autoPlay
+            loop
+            muted
+            playsInline
+            onError={() => {
+              setVideoLoadError(
+                `Failed to load video at ${activeVideoUrl ?? "(none)"}`
+              );
+            }}
+            onLoadedData={() => {
+              setVideoLoadError(null);
+            }}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              transform: mirror ? "scaleX(-1)" : undefined,
+            }}
+          />
+        )
       ) : (
-        <video
-          ref={fileVideoRef}
-          src={activeVideoUrl ?? undefined}
-          controls
-          autoPlay
-          loop
-          muted
-          playsInline
-          onError={() => {
-            setVideoLoadError(
-              `Failed to load video at ${activeVideoUrl ?? "(none)"}`
-            );
-          }}
-          onLoadedData={() => {
-            setVideoLoadError(null);
-          }}
+        <div
           style={{
             position: "absolute",
             inset: 0,
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-            transform: mirror ? "scaleX(-1)" : undefined,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#0b0b0b",
+            color: "#aaa",
+            fontFamily:
+              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
           }}
-        />
+        >
+          Video stopped. Click “Start video” to resume.
+        </div>
       )}
 
       <canvas
@@ -434,6 +533,14 @@ export default function MediapipePoseDebug() {
         </div>
 
         <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ width: 62, opacity: 0.9 }}>Video</span>
+            {videoEnabled ? (
+              <button onClick={stopVideo}>Stop video</button>
+            ) : (
+              <button onClick={startVideo}>Start video</button>
+            )}
+          </div>
           <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <span style={{ width: 62, opacity: 0.9 }}>Source</span>
             <select
@@ -526,6 +633,17 @@ export default function MediapipePoseDebug() {
             </label>
             <button
               onClick={() => {
+                sendNeutralPose();
+                setBaseline(null);
+                setSendToRobot(false);
+                stopVideo();
+              }}
+              title="Reset servos to 500 and stop video"
+            >
+              Reset + Stop
+            </button>
+            <button
+              onClick={() => {
                 // Capture baseline from current human debug snapshot
                 // (baseline is interpreted as "neutral pose" for delta mapping)
                 setBaseline(
@@ -602,7 +720,82 @@ export default function MediapipePoseDebug() {
           </div>
 
           <div style={{ opacity: 0.85 }}>
-            Servos:
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ width: 62, opacity: 0.9 }}>Servo IDs</span>
+              <button onClick={() => setAllIdsEnabled(true)}>All</button>
+              <button onClick={() => setAllIdsEnabled(false)}>None</button>
+              <button
+                onClick={() => {
+                  setIdsEnabled(
+                    [
+                      ...servoGroups[2].ids,
+                      ...servoGroups[3].ids,
+                    ],
+                    true
+                  );
+                  setIdsEnabled(
+                    [
+                      ...servoGroups[0].ids,
+                      ...servoGroups[1].ids,
+                    ],
+                    false
+                  );
+                }}
+              >
+                Arms
+              </button>
+              <button
+                onClick={() => {
+                  setIdsEnabled(
+                    [
+                      ...servoGroups[0].ids,
+                      ...servoGroups[1].ids,
+                    ],
+                    true
+                  );
+                  setIdsEnabled(
+                    [
+                      ...servoGroups[2].ids,
+                      ...servoGroups[3].ids,
+                    ],
+                    false
+                  );
+                }}
+              >
+                Legs
+              </button>
+            </div>
+            <div
+              style={{
+                marginTop: 6,
+                display: "grid",
+                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                gap: "4px 12px",
+              }}
+            >
+              {servoGroups.map((group) => {
+                const checked = group.ids.every((id) => servoEnabled[id]);
+                return (
+                  <label
+                    key={group.label}
+                    style={{ display: "flex", gap: 6, alignItems: "center" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) =>
+                        setIdsEnabled(group.ids.slice(), e.target.checked)
+                      }
+                    />
+                    <span>{group.label}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ opacity: 0.85 }}>
+            Servos (pulse 0–1000):
             <div
               style={{
                 marginTop: 6,
@@ -612,24 +805,36 @@ export default function MediapipePoseDebug() {
               }}
             >
               {HUMANOID16_SERVO_NAMES.map((name, i) => {
-                const v = servoDegrees?.[i];
+                const v = servoPulses?.[i];
+                const id = tonyPiIdForIndex(i);
+                const enabled = servoEnabled[id] ?? true;
                 return (
                   <div
-                    key={`${tonyPiIdForIndex(i)}-${name}`}
+                    key={`${id}-${name}`}
                     style={{
                       display: "flex",
                       justifyContent: "space-between",
+                      alignItems: "center",
                       gap: 10,
                       padding: "2px 6px",
                       borderRadius: 6,
                       background: "rgba(255,255,255,0.06)",
                     }}
                   >
+                    <label
+                      style={{ display: "flex", gap: 6, alignItems: "center" }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={(e) => setIdsEnabled([id], e.target.checked)}
+                      />
+                      <code style={{ opacity: 0.95 }}>
+                        ID{id} {name}
+                      </code>
+                    </label>
                     <code style={{ opacity: 0.95 }}>
-                      ID{tonyPiIdForIndex(i)} {name}
-                    </code>
-                    <code style={{ opacity: 0.95 }}>
-                      {v != null ? `${Math.round(v)}°` : "—"}
+                      {v != null ? `${Math.round(v)}` : "—"}
                     </code>
                   </div>
                 );
@@ -638,7 +843,7 @@ export default function MediapipePoseDebug() {
           </div>
 
           <div style={{ opacity: 0.85 }}>
-            Head (PWM):
+            Head (PWM us):
             <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
               <div
                 style={{
@@ -652,7 +857,7 @@ export default function MediapipePoseDebug() {
               >
                 <code style={{ opacity: 0.95 }}>p1 head_pitch</code>
                 <code style={{ opacity: 0.95 }}>
-                  {headOut ? `${Math.round(headOut.p1)}°` : "—"}
+                  {headOut ? `${Math.round(headOut.p1)}us` : "—"}
                 </code>
               </div>
               <div
@@ -667,7 +872,7 @@ export default function MediapipePoseDebug() {
               >
                 <code style={{ opacity: 0.95 }}>p2 head_yaw</code>
                 <code style={{ opacity: 0.95 }}>
-                  {headOut ? `${Math.round(headOut.p2)}°` : "—"}
+                  {headOut ? `${Math.round(headOut.p2)}us` : "—"}
                 </code>
               </div>
             </div>

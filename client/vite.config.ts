@@ -17,8 +17,8 @@ function servoTerminalLogPlugin() {
         req.on("end", () => {
           try {
             const msg = JSON.parse(body || "{}");
-            if (msg?.kind === "humanoid16" && Array.isArray(msg?.degrees)) {
-              const arr = msg.degrees
+            if (msg?.kind === "humanoid16" && Array.isArray(msg?.pulses)) {
+              const arr = msg.pulses
                 .slice(0, 16)
                 .map((n: unknown) => Math.round(Number(n)));
               if (arr.length === 16 && arr.every((n: number) => Number.isFinite(n))) {
